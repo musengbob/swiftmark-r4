@@ -159,27 +159,28 @@ const P_HTML_START = ' {0,3}(?:</?(?:TAG)(?: +|\\n|/?>)|<(?:(?:script|pre|style|
 
 // Indent-sensitive helpers for list continuation lines. The indent argument
 // is clamped to 0..3 after subtracting 1, matching marked's behaviour.
+// The continuation regexes are memoized per clamped indent (marked does the
+// same); rebuilding them per item was a measurable cost.
 function clampIndent(n) { return Math.max(0, Math.min(3, n - 1)); }
 function listItemRe(bullet) {
   return new RegExp(`^( {0,3}${bullet})((?:[\t ][^\n]*)?(?:\n|$))`);
 }
-function nextBulletRe(indent) {
-  return new RegExp(`^ {0,${clampIndent(indent)}}(?:[*+-]|\\d{1,9}[.)])((?:[ \t][^\n]*)?(?:\n|$))`);
-}
-function hrAtRe(indent) {
-  return new RegExp(`^ {0,${clampIndent(indent)}}((?:-[ \t]*){3,}|(?:_[ \t]*){3,}|(?:\\*[ \t]*){3,})(?:\\n+|$)`);
-}
-function fencesBeginRe(indent) {
-  return new RegExp(`^ {0,${clampIndent(indent)}}(?:\`\`\`|~~~)`);
-}
-function headingBeginRe(indent) {
-  return new RegExp(`^ {0,${clampIndent(indent)}}#{1,6}(?:\\s|$)`);
-}
-function htmlBeginRe(indent) {
-  return new RegExp(`^ {0,${clampIndent(indent)}}(?:</?(?:${BLOCK_TAGS})(?: +|$|/?>)|<(?:(?:script|pre|style|textarea)(?:[\\s>]|$)|!--)|<\\?|<![A-Za-z]|<!\\[CDATA\\[)`, 'i');
-}
-function blockquoteBeginRe(indent) {
-  return new RegExp(`^ {0,${clampIndent(indent)}}>`);
+const _listContCache = [];
+function listContRes(indent) {
+  const n = clampIndent(indent);
+  let c = _listContCache[n];
+  if (!c) {
+    c = {
+      bullet: new RegExp(`^ {0,${n}}(?:[*+-]|\\d{1,9}[.)])((?:[ \t][^\n]*)?(?:\n|$))`),
+      hr: new RegExp(`^ {0,${n}}((?:-[ \t]*){3,}|(?:_[ \t]*){3,}|(?:\\*[ \t]*){3,})(?:\\n+|$)`),
+      fences: new RegExp(`^ {0,${n}}(?:\`\`\`|~~~)`),
+      heading: new RegExp(`^ {0,${n}}#{1,6}(?:\\s|$)`),
+      html: new RegExp(`^ {0,${n}}(?:</?(?:${BLOCK_TAGS})(?: +|$|/?>)|<(?:(?:script|pre|style|textarea)(?:[\\s>]|$)|!--)|<\\?|<![A-Za-z]|<!\\[CDATA\\[)`, 'i'),
+      blockquote: new RegExp(`^ {0,${n}}>`),
+    };
+    _listContCache[n] = c;
+  }
+  return c;
 }
 
 // Misc block-level helpers.
@@ -394,6 +395,8 @@ function linkInText(st, src) {
 }
 
 function maskSrc(st, src) {
+  // Without [, `, < or \, every masking replacement is the identity.
+  if (!src.includes('[') && !src.includes('`') && !src.includes('<') && !src.includes('\\')) return src;
   let t = src;
   if (src.includes('[')) {
     const maskRef = (m) => {
@@ -851,6 +854,32 @@ function tryTable(st, src) {
   return { rawLen: raw.length, rec: { k: 'table', header, rows } };
 }
 
+// Cheap gates: the lheading/table regexes scan far ahead and usually fail,
+// so only run them when a setext underline / table delimiter line exists.
+// The setext scan is bounded to the current paragraph (it cannot cross a
+// blank line); the bound uses the next truly empty line, a safe superset.
+const SETEXT_GATE = /\n {0,3}[=-]/;
+function setextGate(src) {
+  const blank = src.indexOf('\n\n');
+  return blank === -1 ? SETEXT_GATE.test(src) : SETEXT_GATE.test(src.slice(0, blank));
+}
+// Does s end with a blank line (/\n[ \t]*\n[ \t]*$/), without a regex?
+function endsWithDoubleBlank(s) {
+  let i = s.length;
+  while (i > 0 && (s[i - 1] === ' ' || s[i - 1] === '\t')) i--;
+  if (i === 0 || s[i - 1] !== '\n') return false;
+  i--;
+  while (i > 0 && (s[i - 1] === ' ' || s[i - 1] === '\t')) i--;
+  return i > 0 && s[i - 1] === '\n';
+}
+function tableGate(src) {
+  const nl1 = src.indexOf('\n');
+  if (nl1 === -1) return false;
+  const nl2 = src.indexOf('\n', nl1 + 1);
+  const line2 = nl2 === -1 ? src.slice(nl1 + 1) : src.slice(nl1 + 1, nl2);
+  return line2.includes('-') && (line2.includes('|') || line2.includes(':'));
+}
+
 function blockParse(st, src, blocks, inQuote) {
   let mergePara = inQuote;
   let minLen = Infinity;
@@ -926,9 +955,9 @@ function blockParse(st, src, blocks, inQuote) {
         continue;
       }
     }
-    const tb = tryTable(st, src);
+    const tb = tableGate(src) ? tryTable(st, src) : null;
     if (tb) { src = src.substring(tb.rawLen); blocks.push(tb.rec); continue; }
-    if ((m = R_LHEADING.exec(src))) {
+    if (setextGate(src) && (m = R_LHEADING.exec(src))) {
       const text = m[1].trim();
       const raw = rtrimChar(m[0], '\n');
       src = src.substring(raw.length);
@@ -1071,12 +1100,13 @@ function tryList(st, src) {
       skippedBlank = true;
     }
     if (!skippedBlank) {
-      const v = nextBulletRe(R);
-      const Q = hrAtRe(R);
-      const ee = fencesBeginRe(R);
-      const te = headingBeginRe(R);
-      const M = htmlBeginRe(R);
-      const ne = blockquoteBeginRe(R);
+      const cr = listContRes(R);
+      const v = cr.bullet;
+      const Q = cr.hr;
+      const ee = cr.fences;
+      const te = cr.heading;
+      const M = cr.html;
+      const ne = cr.blockquote;
       while (e) {
         const U = e.split('\n', 1)[0];
         f = U;
@@ -1099,7 +1129,7 @@ function tryList(st, src) {
     const itemRaw = orig.slice(itemStart, consumed());
     if (!rec.loose) {
       if (prevBlank) rec.loose = true;
-      else if (DOUBLE_BLANK_LINE.test(itemRaw)) prevBlank = true;
+      else if (endsWithDoubleBlank(itemRaw)) prevBlank = true;
     }
     rec.items.push({ raw: itemRaw, task: LIST_IS_TASK.test(d), text: d, blocks: null });
   }
