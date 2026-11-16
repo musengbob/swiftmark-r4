@@ -921,13 +921,20 @@ function blockParse(st, src, blocks, inQuote) {
     if (src.length < minLen) minLen = src.length;
     else throw new Error('Infinite loop on byte: ' + src.charCodeAt(0));
     let m;
-    if ((m = R_NEWLINE.exec(src))) {
+    // Block dispatch: the first non-space char decides which constructs can
+    // match (all allow at most 3 leading spaces); 4+ spaces can only be
+    // code, a blank line, or paragraph text.
+    let sp = 0;
+    while (src.charCodeAt(sp) === 32) sp++;
+    const ch = src.charCodeAt(sp);
+    const indented = sp >= 4;
+    if ((ch === 10 || ch === 9 || sp >= src.length) && (m = R_NEWLINE.exec(src))) {
       src = src.substring(m[0].length);
       const prev = blocks[blocks.length - 1];
       if (!(m[0].length === 1 && prev !== undefined)) blocks.push({ k: 'space', raw: m[0] });
       continue;
     }
-    if ((m = R_CODE.exec(src))) {
+    if ((indented || (sp <= 3 && ch === 9)) && (m = R_CODE.exec(src))) {
       const raw = trimBlankTail(m[0]);
       const text = raw.replace(CODE_REMOVE_INDENT, '');
       src = src.substring(raw.length);
@@ -938,13 +945,13 @@ function blockParse(st, src, blocks, inQuote) {
       } else blocks.push({ k: 'code', lang: null, text });
       continue;
     }
-    if ((m = R_FENCES.exec(src))) {
+    if (!indented && (ch === 96 || ch === 126) && (m = R_FENCES.exec(src))) {
       const text = fenceText(m[0], m[3] || '');
       src = src.substring(m[0].length);
       blocks.push({ k: 'code', lang: m[2] ? m[2].trim().replace(I_ANY_PUNCT, '$1') : m[2], text });
       continue;
     }
-    if ((m = R_HEADING.exec(src))) {
+    if (!indented && ch === 35 && (m = R_HEADING.exec(src))) {
       let text = m[2].trim();
       if (ENDING_HASH.test(text)) {
         const stripped = rtrimChar(text, '#');
@@ -957,23 +964,23 @@ function blockParse(st, src, blocks, inQuote) {
       blocks.push(rec);
       continue;
     }
-    if ((m = R_HR.exec(src))) {
+    if (!indented && (ch === 45 || ch === 95 || ch === 42) && (m = R_HR.exec(src))) {
       const raw = rtrimChar(m[0], '\n');
       src = src.substring(raw.length);
       blocks.push({ k: 'hr' });
       continue;
     }
-    const bq = tryBlockquote(st, src);
+    const bq = !indented && ch === 62 ? tryBlockquote(st, src) : null;
     if (bq) { src = src.substring(bq.rawLen); blocks.push(bq.rec); continue; }
-    const li = tryList(st, src);
+    const li = !indented && (ch === 42 || ch === 43 || ch === 45 || (ch >= 48 && ch <= 57)) ? tryList(st, src) : null;
     if (li) { src = src.substring(li.rawLen); blocks.push(li.rec); continue; }
-    if ((m = R_HTML.exec(src))) {
+    if (!indented && ch === 60 && (m = R_HTML.exec(src))) {
       const raw = trimBlankTail(m[0]);
       src = src.substring(raw.length);
       blocks.push({ k: 'html', text: raw });
       continue;
     }
-    if ((m = R_DEF.exec(src))) {
+    if (!indented && ch === 91 && (m = R_DEF.exec(src))) {
       const def = tryDef(m);
       if (def) {
         const raw = rtrimChar(m[0], '\n');
@@ -1357,7 +1364,7 @@ export function parse(markdown) {
     top: true,
     iq: [],
   };
-  const src = markdown.replace(CARRIAGE_RETURN, '\n');
+  const src = markdown.includes('\r') ? markdown.replace(CARRIAGE_RETURN, '\n') : markdown;
   const blocks = [];
   blockParse(st, src, blocks, false);
   for (const entry of st.iq) {
