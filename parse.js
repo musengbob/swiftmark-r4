@@ -21,7 +21,7 @@ const BLANK_LINE = /^[ \t]*$/;
 function esc(s, encodeAll) {
   if (encodeAll) {
     if (ESCAPE_ALL_TEST.test(s)) return s.replace(ESCAPE_ALL_REPLACE, (c) => ESCAPE_MAP[c]);
-  } else if (ESCAPE_NO_ENCODE_TEST.test(s)) {
+  } else if (ESCAPE_ALL_TEST.test(s) && ESCAPE_NO_ENCODE_TEST.test(s)) {
     return s.replace(ESCAPE_NO_ENCODE_REPLACE, (c) => ESCAPE_MAP[c]);
   }
   return s;
@@ -30,6 +30,7 @@ function esc(s, encodeAll) {
 // Decode numeric character references; a stray & becomes &amp;. Named
 // references pass through untouched (the renderer leaves them as-is).
 function unesc(s) {
+  if (s.indexOf('&#') === -1) return s;
   if (!NUMERIC_REF_TEST.test(s)) return s;
   return s.replace(NUMERIC_REF_OR_AMP, (m, dec, hex) => {
     if (dec === undefined && hex === undefined) return '&amp;';
@@ -43,7 +44,8 @@ function unesc(s) {
 // Clean a link/image URL the way marked does: encodeURI, keeping % intact.
 function cleanUrl(s) {
   try {
-    return encodeURI(s).replace(/%25/g, '%');
+    const u = encodeURI(s);
+    return u.indexOf('%25') === -1 ? u : u.replace(/%25/g, '%');
   } catch {
     return null;
   }
@@ -687,6 +689,15 @@ function inlineRender(st, src, wantH, wantP) {
 const NON_SPACE_CHAR = /[^ ]/;
 const NEWLINE_GLOBAL = /\n/g;
 
+// Can a bare URL / email token start at this char? All url alternatives
+// (mailto:, xmpp:, scheme://, www., email) start with an email char.
+function isUrlStart(c) {
+  return (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) ||
+    c === 46 || c === 33 || c === 35 || c === 36 || c === 37 || c === 38 || c === 39 ||
+    c === 42 || c === 43 || c === 47 || c === 61 || c === 63 || c === 95 || c === 96 ||
+    c === 123 || c === 124 || c === 125 || c === 126 || c === 45;
+}
+
 function inlineLoop(st, src, masked, lastStar, lastUnd, lastTilde, wantH, wantP) {
   let outH = '';
   let outP = '';
@@ -701,13 +712,14 @@ function inlineLoop(st, src, masked, lastStar, lastUnd, lastTilde, wantH, wantP)
     prevWasText = false;
     let m;
     let r;
-    if ((m = I_ESCAPE.exec(e))) {
+    const c0 = e.charCodeAt(0);
+    if (c0 === 92 && (m = I_ESCAPE.exec(e))) {
       e = e.substring(m[0].length);
       if (wantH) outH += esc(m[1]);
       if (wantP) outP += m[1];
       continue;
     }
-    if ((m = I_TAG.exec(e))) {
+    if (c0 === 60 && (m = I_TAG.exec(e))) {
       if (!st.inLink && START_A_TAG.test(m[0])) st.inLink = true;
       else if (st.inLink && END_A_TAG.test(m[0])) st.inLink = false;
       if (!st.inRawBlock && START_PRE_TAG.test(m[0])) st.inRawBlock = true;
@@ -717,25 +729,25 @@ function inlineLoop(st, src, masked, lastStar, lastUnd, lastTilde, wantH, wantP)
       if (wantP) outP += m[0];
       continue;
     }
-    if ((r = tryLink(st, e, wantH, wantP))) {
+    if ((c0 === 91 || c0 === 33) && (r = tryLink(st, e, wantH, wantP))) {
       e = e.substring(r.rawLen);
       if (wantH) outH += r.h;
       if (wantP) outP += r.p;
       continue;
     }
-    if ((r = tryReflink(st, e, wantH, wantP))) {
+    if ((c0 === 91 || c0 === 33) && (r = tryReflink(st, e, wantH, wantP))) {
       e = e.substring(r.rawLen);
       if (wantH) outH += r.h;
       if (wantP) outP += r.p;
       continue;
     }
-    if ((r = tryEmStrong(st, e, masked, prevChar, lastStar, lastUnd, wantH, wantP))) {
+    if ((c0 === 42 || c0 === 95) && (r = tryEmStrong(st, e, masked, prevChar, lastStar, lastUnd, wantH, wantP))) {
       e = e.substring(r.rawLen);
       if (wantH) outH += r.h;
       if (wantP) outP += r.p;
       continue;
     }
-    if ((m = I_CODE.exec(e))) {
+    if (c0 === 96 && (m = I_CODE.exec(e))) {
       let text = m[2].replace(NEWLINE_GLOBAL, ' ');
       if (NON_SPACE_CHAR.test(text) && text.charAt(0) === ' ' && text.charAt(text.length - 1) === ' ') text = text.substring(1, text.length - 1);
       e = e.substring(m[0].length);
@@ -743,18 +755,18 @@ function inlineLoop(st, src, masked, lastStar, lastUnd, lastTilde, wantH, wantP)
       if (wantP) outP += text;
       continue;
     }
-    if ((m = I_BR.exec(e))) {
+    if ((c0 === 32 || c0 === 92) && (m = I_BR.exec(e))) {
       e = e.substring(m[0].length);
       if (wantH) outH += '<br>';
       continue;
     }
-    if ((r = tryDel(st, e, masked, prevChar, lastTilde, wantH, wantP))) {
+    if (c0 === 126 && (r = tryDel(st, e, masked, prevChar, lastTilde, wantH, wantP))) {
       e = e.substring(r.rawLen);
       if (wantH) outH += r.h;
       if (wantP) outP += r.p;
       continue;
     }
-    if ((m = I_AUTOLINK.exec(e))) {
+    if (c0 === 60 && (m = I_AUTOLINK.exec(e))) {
       let text;
       let href;
       if (m[2] === '@') { text = m[1]; href = 'mailto:' + text; }
@@ -764,7 +776,7 @@ function inlineLoop(st, src, masked, lastStar, lastUnd, lastTilde, wantH, wantP)
       if (wantP) outP += text;
       continue;
     }
-    if (!st.inLink && (r = tryUrl(e))) {
+    if (!st.inLink && isUrlStart(c0) && (r = tryUrl(e))) {
       e = e.substring(r.rawLen);
       if (wantH) outH += r.h;
       if (wantP) outP += r.p;
