@@ -398,9 +398,13 @@ function linkInText(st, src) {
 
 function maskSrc(st, src) {
   // Without [, `, < or \, every masking replacement is the identity.
-  if (!src.includes('[') && !src.includes('`') && !src.includes('<') && !src.includes('\\')) return src;
+  const hasBracket = src.includes('[');
+  const hasTick = src.includes('`');
+  const hasLt = src.includes('<');
+  const hasBs = src.includes('\\');
+  if (!hasBracket && !hasTick && !hasLt && !hasBs) return src;
   let t = src;
-  if (src.includes('[')) {
+  if (hasBracket) {
     const maskRef = (m) => {
       const o = m.lastIndexOf('[');
       if (!Object.hasOwn(st.links, normLabel(m.slice(o + 1, -1)))) return m;
@@ -412,12 +416,16 @@ function maskSrc(st, src) {
     };
     t = t.replace(I_REFLINK_SEARCH, maskRef);
   }
-  t = t.replace(I_ANY_PUNCT_OUTSIDE_CODE, (m, ticks, punct) => {
-    if (punct) return '+'.repeat(m.length);
-    if (ticks) return ticks + m.slice(ticks.length, -ticks.length).replace(/`/g, '+') + ticks;
-    return m;
-  });
-  t = t.replace(R_BLOCK_SKIP, (m) => '[' + 'a'.repeat(m.length - 2) + ']');
+  if (hasTick || hasBs) {
+    t = t.replace(I_ANY_PUNCT_OUTSIDE_CODE, (m, ticks, punct) => {
+      if (punct) return '+'.repeat(m.length);
+      if (ticks) return ticks + m.slice(ticks.length, -ticks.length).replace(/`/g, '+') + ticks;
+      return m;
+    });
+  }
+  if (hasBracket || hasTick || hasLt) {
+    t = t.replace(R_BLOCK_SKIP, (m) => '[' + 'a'.repeat(m.length - 2) + ']');
+  }
   return t;
 }
 
