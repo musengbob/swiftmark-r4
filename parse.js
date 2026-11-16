@@ -857,11 +857,25 @@ function tryTable(st, src) {
 // Cheap gates: the lheading/table regexes scan far ahead and usually fail,
 // so only run them when a setext underline / table delimiter line exists.
 // The setext scan is bounded to the current paragraph (it cannot cross a
-// blank line); the bound uses the next truly empty line, a safe superset.
-const SETEXT_GATE = /\n {0,3}[=-]/;
+// blank line) and done by hand instead of a regex over a slice.
 function setextGate(src) {
-  const blank = src.indexOf('\n\n');
-  return blank === -1 ? SETEXT_GATE.test(src) : SETEXT_GATE.test(src.slice(0, blank));
+  let i = src.indexOf('\n');
+  while (i !== -1) {
+    let j = i + 1;
+    let sp = 0;
+    while (sp < 3 && src.charCodeAt(j) === 32) { j++; sp++; }
+    const c = src.charCodeAt(j);
+    if (c === 61 || c === 45) return true;
+    let k = j;
+    while (k < src.length) {
+      const cc = src.charCodeAt(k);
+      if (cc === 32 || cc === 9) { k++; continue; }
+      break;
+    }
+    if (k >= src.length || src.charCodeAt(k) === 10) return false;
+    i = src.indexOf('\n', k);
+  }
+  return false;
 }
 // Does s end with a blank line (/\n[ \t]*\n[ \t]*$/), without a regex?
 function endsWithDoubleBlank(s) {
@@ -1063,6 +1077,62 @@ function tryBlockquote(st, src) {
 const TAB_TO_SPACES = /\t/g;
 const LEADING_3_SPACES = /^ {0,3}/;
 
+// Fast helpers for the list loop (hot path).
+function firstLine(s) {
+  const i = s.indexOf('\n');
+  return i === -1 ? s : s.slice(0, i);
+}
+function firstNonSpace(s) {
+  for (let i = 0; i < s.length; i++) if (s.charCodeAt(i) !== 32) return i;
+  return -1;
+}
+const BLANK_WS = /^\s*$/;
+function isBlankWs(s) { return s.length === 0 || BLANK_WS.test(s); }
+// Expand leading tabs (spaces are unchanged); no-op if no leading tab.
+function expandLeadingTabs(s, startCol) {
+  const c0 = s.charCodeAt(0);
+  if (c0 !== 32 && c0 !== 9) return s;
+  let k = 0, hasTab = false;
+  while (k < s.length) {
+    const c = s.charCodeAt(k);
+    if (c === 32) k++;
+    else if (c === 9) { hasTab = true; k++; }
+    else break;
+  }
+  return hasTab ? s.replace(LEADING_SPACE_TAB, (ws) => expandTabs(ws, startCol)) : s;
+}
+// Column of the first non-space/tab char, counting each tab as 4 columns
+// (as if tabs were replaced by four spaces); -1 if none.
+function tab4NonSpace(s) {
+  let col = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c === 32) col++;
+    else if (c === 9) col += 4;
+    else return col;
+  }
+  return -1;
+}
+// Can any list-interrupt regex match this raw line? The interrupt patterns
+// allow at most n leading spaces before a marker char.
+function canInterrupt(f, n) {
+  let i = 0;
+  while (i < f.length && f.charCodeAt(i) === 32) {
+    i++;
+    if (i > n) return false;
+  }
+  if (i >= f.length) return false;
+  const c = f.charCodeAt(i);
+  return c === 42 || c === 43 || c === 45 || c === 95 || c === 96 || c === 126 ||
+    c === 35 || c === 60 || c === 62 || (c >= 48 && c <= 57);
+}
+const _itemReCache = new Map();
+function listItemReCached(bullet) {
+  let r = _itemReCache.get(bullet);
+  if (!r) { r = listItemRe(bullet); _itemReCache.set(bullet, r); }
+  return r;
+}
+
 function tryList(st, src) {
   const m = R_LIST.exec(src);
   if (!m) return null;
@@ -1073,7 +1143,7 @@ function tryList(st, src) {
   const ordered = bullet.length > 1;
   const rec = { k: 'list', ordered, start: ordered ? +bullet.slice(0, -1) : '', loose: false, items: [] };
   const bulletPat = ordered ? `\\d{1,9}\\${bullet.slice(-1)}` : `\\${bullet}`;
-  const itemRe = listItemRe(bulletPat);
+  const itemRe = listItemReCached(bulletPat);
   let prevBlank = false;
   while (e) {
     let skippedBlank = false;
@@ -1082,15 +1152,15 @@ function tryList(st, src) {
     if (!t || R_HR.test(e)) break;
     const itemStart = consumed();
     e = e.substring(t[0].length);
-    const g = t[2].split('\n', 1)[0];
+    const g = t[2].endsWith('\n') ? t[2].slice(0, -1) : t[2];
     const b = t[1].length;
-    let line = g.replace(LEADING_SPACE_TAB, (ws) => expandTabs(ws, b));
-    let f = e.split('\n', 1)[0];
-    let y = !line.trim();
+    let line = expandLeadingTabs(g, b);
+    let f = firstLine(e);
+    let y = isBlankWs(line);
     let R = 0;
     if (y) R = b + 1;
     else {
-      R = line.search(NON_SPACE);
+      R = firstNonSpace(line);
       R = R > 4 ? 1 : R;
       d = line.slice(R);
       R += b;
@@ -1101,6 +1171,7 @@ function tryList(st, src) {
     }
     if (!skippedBlank) {
       const cr = listContRes(R);
+      const n = clampIndent(R);
       const v = cr.bullet;
       const Q = cr.hr;
       const ee = cr.fences;
@@ -1108,20 +1179,20 @@ function tryList(st, src) {
       const M = cr.html;
       const ne = cr.blockquote;
       while (e) {
-        const U = e.split('\n', 1)[0];
+        const U = firstLine(e);
         f = U;
-        const Z = U.replace(LEADING_SPACE_TAB, (ws) => expandTabs(ws));
-        if (ee.test(f) || te.test(f) || M.test(f) || ne.test(f) || v.test(f) || Q.test(f)) break;
-        if (Z.search(NON_SPACE) >= R || !f.trim()) {
+        const Z = expandLeadingTabs(U);
+        if (canInterrupt(f, n) && (ee.test(f) || te.test(f) || M.test(f) || ne.test(f) || v.test(f) || Q.test(f))) break;
+        if (firstNonSpace(Z) >= R || isBlankWs(f)) {
           d += '\n' + Z.slice(R);
         } else {
-          if (y || line.replace(TAB_TO_SPACES, '    ').search(NON_SPACE) >= 4 || ee.test(line) || te.test(line) || M.test(line) || Q.test(line)) break;
+          if (y || tab4NonSpace(line) >= 4 || ee.test(line) || te.test(line) || M.test(line) || Q.test(line)) break;
           const qe = SETEXT_LINE.test(f) && R_LHEADING.test(line + '\n' + f)
             ? '    ' + Z.replace(LEADING_3_SPACES, '')
             : f;
           d += '\n' + qe;
         }
-        y = !f.trim();
+        y = isBlankWs(f);
         e = e.substring(U.length + 1);
         line = Z.slice(R);
       }
